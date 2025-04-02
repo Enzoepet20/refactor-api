@@ -4,127 +4,67 @@ import {
   Controller,
   Delete,
   Get,
-  OnModuleDestroy,
-  OnModuleInit,
   Param,
   Patch,
   Post,
   Query,
+  BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { CreateNeighborhoodDto } from './create-neighborhood.dto';
 import { NeighborhoodPaginatorDto } from './neighborhood-paginator.dto';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 @Controller('neighborhood')
-export class NeighborhoodController
-  extends PrismaClient
-  implements OnModuleInit, OnModuleDestroy
-{
-  onModuleInit() {
-    this.$connect();
-  }
-
-  onModuleDestroy() {
-    this.$disconnect();
-  }
+export class NeighborhoodController {
 
   @Post()
-  async create(@Body() data: CreateNeighborhoodDto, @Owner() usuario) {
-    return this.neighborhood.create({
-      data: {
-        id_visible: (await this.neighborhood.count()) + 1,
-        ...data,
-        uploadUserID: usuario ? usuario.id : undefined,
-      },
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
+  async createNeighborhood(@Body() data: CreateNeighborhoodDto, @Owner() user) {
+    try {
+      const totalNeighborhoods = await prisma.neighborhood.count();
+      return await prisma.neighborhood.create({
+        data: {
+          id_visible: totalNeighborhoods + 1,
+          ...data,
+          uploadUserID: user?.id,
         },
-        city: true,
-      },
-    });
+        include: { uploadUser: true, city: true },
+      });
+    } catch (error) {
+      throw new BadRequestException(error.message);
+    }
   }
 
   @Get()
-  async findAll(@Query() p: NeighborhoodPaginatorDto) {
-    //! Filtramos automáticamente los eliminados -------------------->
-    let where: Prisma.NeighborhoodWhereInput = { deleted: false };
+  async getNeighborhoods(@Query() params: NeighborhoodPaginatorDto) {
+    try {
+      const filter: Prisma.NeighborhoodWhereInput = { deleted: false };
+      const { id, name, active, page, perPage, sortBy, sortByProperty } = params;
 
-    if (p.id) where = { ...where, id: p.id };
-    if (p.name)
-      where = { ...where, name: { contains: p.name, mode: 'insensitive' } };
-    if (p.active != undefined) where = { ...where, active: p.active };
+      if (id) filter.id = id;
+      if (name) filter.name = { contains: name, mode: 'insensitive' };
+      if (active !== undefined) filter.active = active;
 
-    const data = await this.neighborhood.findMany({
-      where,
-      skip: p.page && p.perPage ? (p.page - 1) * p.perPage : undefined,
-      take: p.page && p.perPage ? p.perPage : undefined,
-      orderBy: p.sortBy
-        ? {
-            [p.sortByProperty ? p.sortByProperty : 'id_visible']: p.sortBy,
-          }
-        : undefined,
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
-        },
-        city: true,
-      },
-    });
+      const totalNeighborhoods = await prisma.neighborhood.count({ where: filter });
+      const lastPage = perPage ? Math.ceil(totalNeighborhoods / perPage) : 1;
 
-    // Retornamos la data
-    return {
-      data,
-      metadata:
-        p.page && p.perPage
-          ? {
-              page: p.page,
-              totalRecords: await this.neighborhood.count({ where }),
-              lastPage: Math.ceil(
-                (await this.neighborhood.count({ where })) / p.perPage,
-              ),
-            }
-          : {
-              totalRecords: await this.neighborhood.count({ where }),
-            },
-    };
-  }
+      const neighborhoods = await prisma.neighborhood.findMany({
+        where: filter,
+        skip: page && perPage ? (page - 1) * perPage : undefined,
+        take: perPage,
+        orderBy: sortBy ? { [sortByProperty || 'id_visible']: sortBy } : undefined,
+        include: { uploadUser: true, city: true },
+      });
 
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.neighborhood.findFirst({
-      where: { id },
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
-        },
-        city: true,
-      },
-    });
-  }
-
-  @Patch(':id')
-  update(
-    @Param('id') id: string,
-    @Body() data: Partial<CreateNeighborhoodDto>,
-  ) {
-    return this.neighborhood.update({
-      data: {
-        ...data,
-      },
-      where: { id },
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
-        },
-        city: true,
-      },
-    });
-  }
-
-  @Delete(':id')
-  async remove(@Param('id') id: string) {
-    await this.findOne(id);
-    return this.update(id, { deleted: true, deletedAt: new Date() });
+      return {
+        data: neighborhoods,
+        metadata: page && perPage ? { page, totalNeighborhoods, lastPage } : { totalNeighborhoods },
+      };
+    } catch (error) {
+      throw new BadRequestException(error.message);
+    }
   }
 }

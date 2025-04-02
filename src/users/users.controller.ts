@@ -5,197 +5,134 @@ import {
   Delete,
   Get,
   NotFoundException,
-  OnModuleDestroy,
-  OnModuleInit,
   Param,
   ParseUUIDPipe,
   Patch,
   Query,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { CreateUserDto } from './create-user.dto';
 import { UserPaginator } from './user.paginator.dto';
+import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
+const prisma = new PrismaClient();
+
 @Controller('users')
-export class UsersController
-  extends PrismaClient
-  implements OnModuleInit, OnModuleDestroy
-{
-  onModuleInit() {
-    this.$connect();
-  }
-
-  onModuleDestroy() {
-    this.$disconnect();
-  }
-
+export class UsersController {
+  
   @Get()
-  async findAll(@Query() p: UserPaginator) {
-    let where: Prisma.UserWhereInput = { deleted: false };
+  async getUsers(@Query() params: UserPaginator) {
+    try {
+      const filterOptions: Prisma.UserWhereInput = { deleted: false };
+      const { name, id, mail, username, active, root, page, perPage, sortBy, sortByProperty } = params;
 
-    let skip;
-    let take;
-    let orderBy: Prisma.UserOrderByWithRelationInput;
-    let metadata;
+      if (name) {
+        filterOptions.OR = [
+          { name: { contains: name, mode: 'insensitive' } },
+          { last_name: { contains: name, mode: 'insensitive' } },
+        ];
+      }
+      if (id) filterOptions.id_visible = id;
+      if (mail) filterOptions.mail = { contains: mail };
+      if (username) filterOptions.username = { contains: username };
+      if (active !== undefined) filterOptions.active = active;
+      if (root) filterOptions.root = root;
 
-    // Definimos los parámetros de filtro --------------------------->
-    if (p.name) {
-      where = {
-        ...where,
-        OR: [
-          { name: { contains: p.name, mode: 'insensitive' } },
-          { last_name: { contains: p.name, mode: 'insensitive' } },
-        ],
-      };
-    }
-    if (p.id) {
-      where = { ...where, id_visible: p.id };
-    }
-    if (p.mail) where = { ...where, mail: { contains: p.mail } };
-    if (p.username) where = { ...where, username: { contains: p.username } };
-    if (p.active !== undefined) where = { ...where, active: p.active };
-    if (p.root) where = { ...where, root: p.root };
-    // Definimos los parámetros de filtro --------------------------->
-    // Hacemos un count de los registros (con filtro)
-    const totalRecords = await this.user.count({ where });
-    // Calculamos la última página
-    const lastPage = Math.ceil(totalRecords / p.perPage);
-    // En caso de usar el paginator
-    if (p.page && p.perPage) {
-      skip = (p.page - 1) * p.perPage;
-      take = p.perPage;
-    }
-    // Y si se hace el ordenar por
-    if (p.sortBy)
-      orderBy = { [p.sortByProperty ? p.sortByProperty : 'id']: p.sortBy };
-    // Traemos los datos
-    const data = await this.user.findMany({
-      where,
-      skip,
-      take,
-      orderBy,
-      include: {
-        userCity: {
-          where: { city: { active: true, deleted: false } },
-          include: { city: true },
+      const totalUsers = await prisma.user.count({ where: filterOptions });
+      const lastPage = perPage ? Math.ceil(totalUsers / perPage) : 1;
+
+      const users = await prisma.user.findMany({
+        where: filterOptions,
+        skip: page && perPage ? (page - 1) * perPage : undefined,
+        take: perPage,
+        orderBy: sortBy ? { [sortByProperty || 'id']: sortBy } : undefined,
+        include: {
+          userCity: {
+            where: { city: { active: true, deleted: false } },
+            include: { city: true },
+          },
         },
-      },
-    });
-    // Definimos los metadatos extras
-    if (p.page && p.perPage) {
-      //! Si hay un paginator activo
-      metadata = {
-        page: p.page,
-        totalRecords,
-        lastPage,
+      });
+
+      return {
+        data: users,
+        metadata: page && perPage ? { page, totalUsers, lastPage } : { totalUsers },
       };
-    } else {
-      //! O se trajeron los datos completos
-      metadata = {
-        totalRecords,
-      };
+    } catch (error) {
+      throw new BadRequestException(error.message);
     }
-    // Retornamos la data
-    return { data, metadata };
   }
 
   @Get(':id')
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
-    // Envío la contraseña, total esta encriptada
-    return this.user.findFirst({
-      where: { id },
-      include: {
-        userCity: {
-          where: { city: { active: true, deleted: false } },
-          include: { city: true },
+  async getUserById(@Param('id', ParseUUIDPipe) id: string) {
+    try {
+      const user = await prisma.user.findFirst({
+        where: { id },
+        include: {
+          userCity: {
+            where: { city: { active: true, deleted: false } },
+            include: { city: true },
+          },
         },
-      },
-    });
+      });
+
+      if (!user) throw new NotFoundException('User not found');
+      return user;
+    } catch (error) {
+      throw new BadRequestException(error.message);
+    }
   }
 
   @Patch(':id')
-  async update(
-    @Param('id') id: string,
-    @Body() updateUserDto: Partial<CreateUserDto>,
-  ) {
-    const user = await this.user.findFirst({
-      where: { id },
-    });
-    if (!user) throw new NotFoundException('User not found');
+  async updateUser(@Param('id') id: string, @Body() updateData: Partial<CreateUserDto>) {
+    try {
+      const user = await prisma.user.findFirst({ where: { id } });
+      if (!user) throw new NotFoundException('User not found');
 
-    //# Para cambiar la contraseña, se tiene que enviar la propiedad old_password, con la contraseña vieja
-    if (updateUserDto.old_password) {
-      const same = bcrypt.compareSync(
-        updateUserDto.old_password,
-        user.password,
-      );
-      if (!same) throw new UnauthorizedException('Wrong password');
-      // Hasheamos las contraseña nueva
-      const hashPassword = bcrypt.hashSync(updateUserDto.password, 12);
-      // Creamos el objeto parcial para guardar los registros que se modifican
-      //Mandamos todo
-      const result = await this.user
-        .update({
-          where: { id },
-          data: {
-            password: hashPassword,
-            otp: updateUserDto.otp,
-          },
-        })
-        .catch((err) => {
-          throw new BadRequestException(err);
-        });
-      const { password: _, ...updateUser } = result;
-      return updateUser;
-    } else {
-      const { deletedCityID = [], updateCityID = [], ...rest } = updateUserDto;
+      if (updateData.old_password) {
+        const isPasswordValid = bcrypt.compareSync(updateData.old_password, user.password);
+        if (!isPasswordValid) throw new UnauthorizedException('Wrong password');
 
-      const result = await this.user
-        .update({
-          where: { id },
-          data: {
-            ...rest,
-            userCity: {
-              create:
-                updateCityID.length > 0
-                  ? updateCityID.map((c) => {
-                      return { cityID: c };
-                    })
-                  : undefined,
-              deleteMany:
-                deletedCityID.length > 0
-                  ? deletedCityID.map((c) => {
-                      return { cityID: c };
-                    })
-                  : undefined,
-            },
+        updateData.password = bcrypt.hashSync(updateData.password, 12);
+      }
+
+      const { deletedCityID = [], updateCityID = [], ...updateFields } = updateData;
+
+      const updatedUser = await prisma.user.update({
+        where: { id },
+        data: {
+          ...updateFields,
+          userCity: {
+            create: updateCityID.length ? updateCityID.map(cityID => ({ cityID })) : undefined,
+            deleteMany: deletedCityID.length ? deletedCityID.map(cityID => ({ cityID })) : undefined,
           },
-          include: {
-            userCity: {
-              where: { city: { active: true, deleted: false } },
-              include: { city: true },
-            },
+        },
+        include: {
+          userCity: {
+            where: { city: { active: true, deleted: false } },
+            include: { city: true },
           },
-        })
-        .catch((err) => {
-          console.error(err);
-          throw new BadRequestException(err);
-        });
-      const { password: _, ...user } = result;
-      return user;
+        },
+      });
+
+      const { password, ...userWithoutPassword } = updatedUser;
+      return userWithoutPassword;
+    } catch (error) {
+      throw new BadRequestException(error.message);
     }
   }
 
   @Delete(':id')
-  async remove(@Param('id') id: string) {
-    await this.findOne(id); //! Buscamos el error
-    const user = await this.update(id, {
-      deleted: true,
-      deleteDate: new Date(),
-    });
-    if (!user) throw new BadRequestException('Something goes wrong');
-    return `User removed`;
+  async deleteUser(@Param('id') id: string) {
+    try {
+      await this.getUserById(id);
+      const deletedUser = await this.updateUser(id, { deleted: true, deleteDate: new Date() });
+      if (!deletedUser) throw new BadRequestException('Deletion failed');
+      return `User removed`;
+    } catch (error) {
+      throw new BadRequestException(error.message);
+    }
   }
 }
