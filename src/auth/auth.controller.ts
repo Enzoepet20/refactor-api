@@ -7,8 +7,8 @@ import {
   Controller,
   Get,
   Logger,
-  OnModuleDestroy,
   OnModuleInit,
+  OnModuleDestroy,
   Post,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -24,58 +24,62 @@ export class LoginDto {
   password: string;
 }
 
+const prisma = new PrismaClient();
+
 @Controller('auth')
-export class AuthController
-  extends PrismaClient
-  implements OnModuleInit, OnModuleDestroy
-{
+export class AuthController implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('AUTH');
 
+  constructor(private readonly jwt: JwtService) {}
+
   async onModuleInit() {
-    this.$connect();
+    await prisma.$connect();
     try {
-      const root = await this.user.findFirst({
+      const rootUser = await prisma.user.findFirst({
         where: { OR: [{ username: 'admin' }, { mail: 'admin@admin.com' }] },
       });
-      if (!root) {
-        const rootUser = {
+      if (!rootUser) {
+        const newRoot = {
           username: 'admin',
           mail: 'admin@admin.com',
           password: bcrypt.hashSync('contraseña#admin2024', 12),
           root: true,
         };
-        await this.user.create({ data: rootUser });
+        await prisma.user.create({ data: newRoot });
         this.logger.log('ROOT USER CREATED');
-      } else this.logger.log('ROOT USER ALREADY EXIST');
+      } else {
+        this.logger.log('ROOT USER ALREADY EXISTS');
+      }
     } catch (err) {
       this.logger.error(JSON.stringify(err));
     }
   }
 
-  onModuleDestroy() {
-    this.$disconnect();
+  async onModuleDestroy() {
+    await prisma.$disconnect();
   }
 
-  constructor(private readonly jwt: JwtService) {
-    super();
-  }
-
+  // Método para verificar un token
   @Post('check')
   checkToken(@Body('token') token: string) {
     try {
       const payload = this.jwt.verify(token);
-      if (payload) return true;
-      else return false;
+      return payload ? true : false;
     } catch (error) {
       return false;
     }
   }
 
+  // Método para iniciar sesión
   @Post('login')
   @PublicRoute()
   async login(@Body() credentials: LoginDto) {
-    if (credentials.username && credentials.password) {
-      const result = await this.user.findFirst({
+    try {
+      if (!credentials.username || !credentials.password) {
+        throw new UnauthorizedException('Missing credentials');
+      }
+
+      const user = await prisma.user.findFirst({
         where: {
           OR: [
             { username: credentials.username },
@@ -89,55 +93,55 @@ export class AuthController
           },
         },
       });
-      if (!result) throw new UnauthorizedException('User not found');
-      const samePass = bcrypt.compareSync(
-        credentials.password,
-        result.password,
-      );
-      if (!samePass) throw new UnauthorizedException('Wrong credentials');
-      const { id: sub, username, otp } = result || {};
-      const payload = {
-        sub,
-        username,
-        otp,
+
+      if (!user) {
+        throw new UnauthorizedException('User not found');
+      }
+
+      const validPassword = bcrypt.compareSync(credentials.password, user.password);
+      if (!validPassword) {
+        throw new UnauthorizedException('Wrong credentials');
+      }
+
+      const { id, username, otp } = user;
+      const token = this.jwt.sign({ sub: id, username, otp });
+      const { password, ...userWithoutPassword } = user;
+      return { user: userWithoutPassword, token };
+    } catch (error) {
+      throw new BadRequestException(error.message);
+    }
+  }
+
+  // Método para registrar un nuevo usuario
+  @Post('register')
+  async register(@Body() userData: CreateUserDto, @Owner() owner: any) {
+    try {
+      const newUser = {
+        ...userData,
+        id_user: owner.id,
+        password: bcrypt.hashSync(userData.password, 12),
       };
 
-      const token = this.jwt.sign(payload);
-      const { password: _, ...user } = result;
-      return { user, token };
-    } else throw new UnauthorizedException('Missing credentials');
-  }
-
-  @Post('register')
-  async register(@Body() u: CreateUserDto, @Owner() owner: any) {
-    const user: Partial<CreateUserDto> = {
-      id_user: owner.id,
-      password: bcrypt.hashSync(u.password, 12),
-      ...u,
-    };
-
-    const result = await this.user
-      .create({
+      const createdUser = await prisma.user.create({
         data: {
-          ...user,
+          ...newUser,
           userCity: {
-            create:
-              u.updateCityID.length > 0
-                ? u.updateCityID.map((c) => {
-                    return { cityID: c };
-                  })
-                : undefined,
+            create: userData.updateCityID && userData.updateCityID.length > 0
+              ? userData.updateCityID.map((cityID) => ({ cityID }))
+              : undefined,
           },
         },
-      })
-      .catch((err) => {
-        console.error(err);
-        throw new BadRequestException(err);
       });
-    const { password: _, ...newUser } = result;
-    return newUser;
+
+      const { password, ...userWithoutPassword } = createdUser;
+      return userWithoutPassword;
+    } catch (err) {
+      this.logger.error(err);
+      throw new BadRequestException(err);
+    }
   }
 
+  // Método para obtener información del usuario autenticado
   @Get('info')
   getUserInfo(@Owner() user: any) {
     return user;

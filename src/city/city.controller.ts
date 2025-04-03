@@ -7,117 +7,118 @@ import {
   Param,
   Delete,
   Query,
-  OnModuleDestroy,
-  OnModuleInit,
 } from '@nestjs/common';
 import { CreateCityDto } from './create-city.dto';
 import { CityPaginatorDto } from './city-paginator.dto';
 import { Owner } from '@/common/decorators/user.decorator';
 import { Prisma, PrismaClient } from '@prisma/client';
 
+const prisma = new PrismaClient();
+
 @Controller('city')
-export class CityController
-  extends PrismaClient
-  implements OnModuleInit, OnModuleDestroy
-{
-  onModuleInit() {
-    this.$connect();
-  }
-
-  onModuleDestroy() {
-    this.$disconnect();
-  }
-
+export class CityController {
+  // Método para crear una ciudad
   @Post()
-  async create(@Body() data: CreateCityDto, @Owner() usuario: any) {
-    return this.city.create({
-      data: {
-        id_visible: (await this.city.count()) + 1,
-        ...data,
-        uploadUserID: usuario.id,
-      },
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
+  async create(@Body() cityData: CreateCityDto, @Owner() user: any) {
+    try {
+      const totalCities = await prisma.city.count();
+      return await prisma.city.create({
+        data: {
+          id_visible: totalCities + 1,
+          ...cityData,
+          uploadUserID: user.id,
         },
-      },
-    });
+        include: {
+          uploadUser: {
+            select: { name: true, last_name: true, id: true, username: true },
+          },
+        },
+      });
+    } catch (error) {
+      throw error;
+    }
   }
 
+  // Método para obtener ciudades con filtros y paginación
   @Get()
-  async findAll(@Query() p: CityPaginatorDto) {
-    let where: Prisma.CityWhereInput = { deleted: false };
+  async findAll(@Query() query: CityPaginatorDto) {
+    try {
+      const { id, active, page, perPage, sortBy, sortByProperty } = query;
+      const filter: Prisma.CityWhereInput = { deleted: false };
 
-    if (p.id) where = { ...where, id: p.id };
-    if (p.active != undefined) where = { ...where, active: p.active };
+      if (id) filter.id = id;
+      if (active !== undefined) filter.active = active;
 
-    // Hacemos un count de los registros (con filtro)
-    const t = await this.city.count({ where });
-    // Calculamos la última página
-    const l = Math.ceil(t / p.perPage);
+      const totalRecords = await prisma.city.count({ where: filter });
+      const lastPage = perPage ? Math.ceil(totalRecords / perPage) : 1;
 
-    const data = await this.city.findMany({
-      where,
-      skip: p.page && p.perPage ? (p.page - 1) * p.perPage : undefined,
-      take: p.page && p.perPage ? p.perPage : undefined,
-      orderBy: p.sortBy
-        ? {
-            [p.sortByProperty ? p.sortByProperty : 'id_visible']: p.sortBy,
-          }
-        : undefined,
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
+      const cities = await prisma.city.findMany({
+        where: filter,
+        skip: page && perPage ? (page - 1) * perPage : undefined,
+        take: page && perPage ? perPage : undefined,
+        orderBy: sortBy
+          ? { [sortByProperty || 'id_visible']: sortBy }
+          : undefined,
+        include: {
+          uploadUser: {
+            select: { name: true, last_name: true, id: true, username: true },
+          },
         },
-      },
-    });
+      });
 
-    // Retornamos la data
-    return {
-      data,
-      metadata:
-        p.page && p.perPage
-          ? {
-              page: p.page,
-              totalRecords: t,
-              lastPage: l,
-            }
-          : {
-              totalRecords: t,
-            },
-    };
+      const metadata = page && perPage
+        ? { page, totalRecords, lastPage }
+        : { totalRecords };
+
+      return { data: cities, metadata };
+    } catch (error) {
+      throw error;
+    }
   }
 
+  // Método para obtener una ciudad por su id
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.city.findFirst({
-      where: { id },
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
+  async findOne(@Param('id') cityId: string) {
+    try {
+      return await prisma.city.findFirst({
+        where: { id: cityId },
+        include: {
+          uploadUser: {
+            select: { name: true, last_name: true, id: true, username: true },
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      throw error;
+    }
   }
 
+  // Método para actualizar una ciudad
   @Patch(':id')
-  update(@Param('id') id: string, @Body() data: Partial<CreateCityDto>) {
-    return this.city.update({
-      data: {
-        ...data,
-      },
-      where: { id },
-      include: {
-        uploadUser: {
-          select: { name: true, last_name: true, id: true, username: true },
+  async update(@Param('id') cityId: string, @Body() cityData: Partial<CreateCityDto>) {
+    try {
+      return await prisma.city.update({
+        data: { ...cityData },
+        where: { id: cityId },
+        include: {
+          uploadUser: {
+            select: { name: true, last_name: true, id: true, username: true },
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      throw error;
+    }
   }
 
+  // Método para marcar una ciudad como eliminada (soft delete)
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    this.update(id, { deleted: true, deletedAt: new Date() });
-    return `This action removes a #${id} claim`;
+  async remove(@Param('id') cityId: string) {
+    try {
+      await this.update(cityId, { deleted: true, deletedAt: new Date() });
+      return { message: `City #${cityId} marked as deleted` };
+    } catch (error) {
+      throw error;
+    }
   }
 }
